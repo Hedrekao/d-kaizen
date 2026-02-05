@@ -23,27 +23,39 @@ const State = struct {
     const JsonFormat = struct {
         remainders: []const [:0]const u8,
         water: f32,
-        daily_tasks: []const DailyTask,
+        last_save: i64,
+        daily_tasks: []DailyTask,
     };
 
     remainders: BoundedArray([:0]const u8, MAX_REMAINDERS) = .{},
     daily_tasks: BoundedArray(DailyTask, MAX_DAILY_TASKS) = .{},
     water: f32 = 0.0,
+    last_save: i64 = 0,
 
     fn fromParsed(parsed: JsonFormat) !State {
+        const new_day = @divFloor(std.time.timestamp(), std.time.s_per_day);
+        const last_day = @divFloor(parsed.last_save, std.time.s_per_day);
+        const is_new_day = new_day > last_day;
+
         var state = State{
-            .water = parsed.water,
+            .water = if (is_new_day) 0.0 else parsed.water,
+            .last_save = parsed.last_save,
         };
+
         for (parsed.remainders) |rem| {
             try state.remainders.append(rem);
         }
-        for (parsed.daily_tasks) |task| {
-            try state.daily_tasks.append(task);
+        for (parsed.daily_tasks) |*task| {
+            if (is_new_day) {
+                task.completed = false;
+            }
+
+            try state.daily_tasks.append(task.*);
         }
         return state;
     }
 
-    fn save(self: *const State) !void {
+    fn save(self: *State) !void {
         const file = std.fs.cwd().createFile("state.json", .{}) catch return;
         defer file.close();
 
@@ -51,8 +63,9 @@ const State = struct {
         var writer = file.writer(&buffer);
         try writer.interface.print("{f}", .{std.json.fmt(JsonFormat{
             .remainders = self.remainders.constSlice(),
-            .daily_tasks = self.daily_tasks.constSlice(),
+            .daily_tasks = self.daily_tasks.slice(),
             .water = self.water,
+            .last_save = std.time.timestamp(),
         }, .{ .whitespace = .indent_2 })});
         try writer.interface.flush();
     }
