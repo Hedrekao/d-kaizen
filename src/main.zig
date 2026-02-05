@@ -9,7 +9,7 @@ const BoundedArray = @import("utils.zig").BoundedArray;
 
 const SCREEN_WIDTH = 800;
 const SCREEN_HEIGHT = 600;
-const TITLE = "D-TRACKER";
+const TITLE = "D-KAIZEN";
 
 const MAX_REMAINDERS = 32;
 const MAX_DAILY_TASKS = 16;

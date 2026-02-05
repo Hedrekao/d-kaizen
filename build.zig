@@ -17,7 +17,7 @@ pub fn build(b: *std.Build) void {
     root_module.linkSystemLibrary("raylib", .{});
 
     const exe = b.addExecutable(.{
-        .name = "space_colonization",
+        .name = "d_kaizen",
         .root_module = root_module,
     });
 
