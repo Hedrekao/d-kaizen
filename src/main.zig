@@ -15,9 +15,15 @@ const MAX_REMAINDERS = 32;
 const MAX_DAILY_TASKS = 16;
 
 const State = struct {
+    remainders: BoundedArray([:0]const u8, MAX_REMAINDERS) = .{},
+    daily_tasks: BoundedArray(DailyTask, MAX_DAILY_TASKS) = .{},
+    water: f32 = 0.0,
+    last_save: i64 = 0,
+
     const DailyTask = struct {
-        name: [:0]const u8,
-        completed: bool = false,
+        name: [:0]const u8 = "",
+        target: u8 = 1,
+        completed: u8 = 0,
     };
 
     const JsonFormat = struct {
@@ -26,11 +32,6 @@ const State = struct {
         last_save: i64,
         daily_tasks: []DailyTask,
     };
-
-    remainders: BoundedArray([:0]const u8, MAX_REMAINDERS) = .{},
-    daily_tasks: BoundedArray(DailyTask, MAX_DAILY_TASKS) = .{},
-    water: f32 = 0.0,
-    last_save: i64 = 0,
 
     fn fromParsed(parsed: JsonFormat) !State {
         const new_day = @divFloor(std.time.timestamp(), std.time.s_per_day);
@@ -45,12 +46,12 @@ const State = struct {
         for (parsed.remainders) |rem| {
             try state.remainders.append(rem);
         }
-        for (parsed.daily_tasks) |*task| {
+        for (parsed.daily_tasks) |task| {
+            var new_task = task;
             if (is_new_day) {
-                task.completed = false;
+                new_task.completed = 0;
             }
-
-            try state.daily_tasks.append(task.*);
+            try state.daily_tasks.append(new_task);
         }
         return state;
     }
@@ -86,7 +87,7 @@ pub fn main() !void {
 
     var raw_state: [4096]u8 = undefined;
     const data = try std.fs.cwd().readFile("state.json", &raw_state);
-    const parsed = try std.json.parseFromSliceLeaky(State.JsonFormat, state_arena.allocator(), data, .{});
+    const parsed = try std.json.parseFromSliceLeaky(State.JsonFormat, state_arena.allocator(), data, .{ .ignore_unknown_fields = true });
     defer state_arena.deinit();
 
     var state = try State.fromParsed(parsed);
@@ -99,7 +100,6 @@ pub fn main() !void {
     const wx: f32 = 430;
 
     const rem_y = boxes_y + boxes_h + 20;
-    var rem_to_remove: ?usize = null;
 
     while (!r.WindowShouldClose()) {
         r.BeginDrawing();
@@ -112,7 +112,17 @@ pub fn main() !void {
         // Daily Tasks
         _ = r.GuiGroupBox(.{ .x = 20, .y = boxes_y, .width = 370, .height = boxes_h }, "DAILY TASKS");
         for (state.daily_tasks.slice(), 0..) |*task, i| {
-            _ = r.GuiCheckBox(.{ .x = 40, .y = boxes_y + 30 + @as(f32, @floatFromInt(i * 40)), .width = 24, .height = 24 }, task.name.ptr, &task.completed);
+            const y = boxes_y + 30 + @as(f32, @floatFromInt(i * 40));
+
+            var label_buf: [96]u8 = undefined;
+            const label = if (task.completed >= task.target)
+                std.fmt.bufPrintZ(&label_buf, "#112#{s}", .{task.name}) catch task.name
+            else
+                std.fmt.bufPrintZ(&label_buf, "{s} ({d}/{d})", .{ task.name, task.completed, task.target }) catch task.name;
+
+            if (r.GuiLabelButton(.{ .x = 40, .y = y, .width = 320, .height = 24 }, label.ptr) == 1) {
+                if (task.completed < task.target) task.completed += 1;
+            }
         }
 
         // Water Tracker
@@ -123,6 +133,7 @@ pub fn main() !void {
         var water_label: [32]u8 = undefined;
         const water_text = std.fmt.bufPrintZ(&water_label, "{d:.2}L / 2.0L", .{state.water}) catch "?";
         _ = r.GuiLabel(.{ .x = wx, .y = boxes_y + 85, .width = 330, .height = 20 }, water_text.ptr);
+
         if (r.GuiButton(.{ .x = wx + 100, .y = boxes_y + 120, .width = 60, .height = 35 }, "-") == 1) {
             state.water -= 0.25;
             if (state.water < 0) state.water = 0;
@@ -133,6 +144,7 @@ pub fn main() !void {
         }
 
         // Remainders
+        var rem_to_remove: ?usize = null;
         _ = r.GuiGroupBox(.{ .x = 20, .y = rem_y, .width = 760, .height = 180 }, "REMINDERS");
         for (state.remainders.slice(), 0..) |rem, i| {
             const y_offset = rem_y + 30 + @as(f32, @floatFromInt(i * 35));
@@ -144,7 +156,6 @@ pub fn main() !void {
 
         if (rem_to_remove) |idx| {
             state.remainders.orderedRemove(idx);
-            rem_to_remove = null;
         }
 
         r.EndDrawing();
