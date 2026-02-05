@@ -5,19 +5,57 @@ const r = @cImport({
     @cInclude("raygui.h");
     @cInclude("style_dark.h");
 });
+const BoundedArray = @import("utils.zig").BoundedArray;
 
 const SCREEN_WIDTH = 800;
 const SCREEN_HEIGHT = 600;
 const TITLE = "D-TRACKER";
 
+const MAX_REMAINDERS = 32;
+const MAX_DAILY_TASKS = 16;
+
 const State = struct {
     const DailyTask = struct {
-        name: []const u8,
-        completed: bool,
+        name: [:0]const u8,
+        completed: bool = false,
     };
 
-    remainders: std.ArrayList([]const u8),
-    daily_tasks: std.ArrayList(DailyTask),
+    const JsonFormat = struct {
+        remainders: []const [:0]const u8,
+        water: f32,
+        daily_tasks: []const DailyTask,
+    };
+
+    remainders: BoundedArray([:0]const u8, MAX_REMAINDERS) = .{},
+    daily_tasks: BoundedArray(DailyTask, MAX_DAILY_TASKS) = .{},
+    water: f32 = 0.0,
+
+    fn fromParsed(parsed: JsonFormat) !State {
+        var state = State{
+            .water = parsed.water,
+        };
+        for (parsed.remainders) |rem| {
+            try state.remainders.append(rem);
+        }
+        for (parsed.daily_tasks) |task| {
+            try state.daily_tasks.append(task);
+        }
+        return state;
+    }
+
+    fn save(self: *const State) !void {
+        const file = std.fs.cwd().createFile("state.json", .{}) catch return;
+        defer file.close();
+
+        var buffer: [4096]u8 = undefined;
+        var writer = file.writer(&buffer);
+        try writer.interface.print("{f}", .{std.json.fmt(JsonFormat{
+            .remainders = self.remainders.constSlice(),
+            .daily_tasks = self.daily_tasks.constSlice(),
+            .water = self.water,
+        }, .{ .whitespace = .indent_2 })});
+        try writer.interface.flush();
+    }
 };
 
 pub fn main() !void {
@@ -26,19 +64,20 @@ pub fn main() !void {
     r.SetTargetFPS(60);
     r.GuiLoadStyleDark();
 
-    var buffer: [3][]const u8 = undefined;
-    var remainders = std.ArrayList([]const u8).initBuffer(&buffer);
-    try remainders.appendBounded("Stand up and stretch for 5 minutes.");
-    try remainders.appendBounded("Check the Zig documentation for build system updates.");
-    try remainders.appendBounded("Review your code for potential optimizations.");
+    // Persistent allocator for state that lives across frames
+    var buffer: [1024 * 8]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&buffer);
 
-    var task_buffer: [3]State.DailyTask = undefined;
-    var daily_tasks = std.ArrayList(State.DailyTask).initBuffer(&task_buffer);
-    try daily_tasks.appendBounded(.{ .name = "Drink Coffee", .completed = false });
-    try daily_tasks.appendBounded(.{ .name = "Write Zig Code", .completed = false });
-    try daily_tasks.appendBounded(.{ .name = "Fix Compiler Errors", .completed = false });
+    var state_arena = std.heap.ArenaAllocator.init(fba.allocator());
+    defer state_arena.deinit();
 
-    var state = State{ .remainders = remainders, .daily_tasks = daily_tasks };
+    var raw_state: [4096]u8 = undefined;
+    const data = try std.fs.cwd().readFile("state.json", &raw_state);
+    const parsed = try std.json.parseFromSliceLeaky(State.JsonFormat, state_arena.allocator(), data, .{});
+    defer state_arena.deinit();
+
+    var state = try State.fromParsed(parsed);
+    defer state.save() catch std.debug.print("Failed to save state\n", .{});
 
     const font_size = 30;
     const text_width = r.MeasureText(TITLE, font_size);
@@ -47,6 +86,7 @@ pub fn main() !void {
     const wx: f32 = 430;
 
     const rem_y = boxes_y + boxes_h + 20;
+    var rem_to_remove: ?usize = null;
 
     while (!r.WindowShouldClose()) {
         r.BeginDrawing();
@@ -58,31 +98,40 @@ pub fn main() !void {
 
         // Daily Tasks
         _ = r.GuiGroupBox(.{ .x = 20, .y = boxes_y, .width = 370, .height = boxes_h }, "DAILY TASKS");
-        for (state.daily_tasks.items, 0..) |*task, i| {
+        for (state.daily_tasks.slice(), 0..) |*task, i| {
             _ = r.GuiCheckBox(.{ .x = 40, .y = boxes_y + 30 + @as(f32, @floatFromInt(i * 40)), .width = 24, .height = 24 }, task.name.ptr, &task.completed);
         }
 
         // Water Tracker
         _ = r.GuiGroupBox(.{ .x = 410, .y = boxes_y, .width = 370, .height = boxes_h }, "WATER TRACKER");
         _ = r.GuiLabel(.{ .x = wx, .y = boxes_y + 25, .width = 150, .height = 20 }, "Water in me:");
-        var progress: f32 = 0.45;
-        _ = r.GuiProgressBar(.{ .x = wx, .y = boxes_y + 50, .width = 330, .height = 30 }, null, null, &progress, 0, 1);
-        _ = r.GuiLabel(.{ .x = wx, .y = boxes_y + 85, .width = 330, .height = 20 }, "0.9L / 2.0L");
-        _ = r.GuiButton(.{ .x = wx, .y = boxes_y + 120, .width = 60, .height = 35 }, "-");
-        _ = r.GuiButton(.{ .x = wx + 70, .y = boxes_y + 120, .width = 60, .height = 35 }, "+");
+        _ = r.GuiProgressBar(.{ .x = wx, .y = boxes_y + 50, .width = 330, .height = 30 }, null, null, &state.water, 0, 2);
+
+        var water_label: [32]u8 = undefined;
+        const water_text = std.fmt.bufPrintZ(&water_label, "{d:.2}L / 2.0L", .{state.water}) catch "?";
+        _ = r.GuiLabel(.{ .x = wx, .y = boxes_y + 85, .width = 330, .height = 20 }, water_text.ptr);
+        if (r.GuiButton(.{ .x = wx + 100, .y = boxes_y + 120, .width = 60, .height = 35 }, "-") == 1) {
+            state.water -= 0.25;
+            if (state.water < 0) state.water = 0;
+        }
+        if (r.GuiButton(.{ .x = wx + 170, .y = boxes_y + 120, .width = 60, .height = 35 }, "+") == 1) {
+            state.water += 0.25;
+            if (state.water > 2.0) state.water = 2.0;
+        }
 
         // Remainders
         _ = r.GuiGroupBox(.{ .x = 20, .y = rem_y, .width = 760, .height = 180 }, "REMINDERS");
-        const len = state.remainders.items.len;
-        for (0..len) |row_idx| {
-            const y_offset = rem_y + 30 + @as(f32, @floatFromInt(row_idx * 35));
-            const rem_idx = len - 1 - row_idx;
-            const button_clicked = r.GuiButton(.{ .x = 40, .y = y_offset, .width = 22, .height = 22 }, "x");
-            _ = r.GuiLabel(.{ .x = 75, .y = y_offset, .width = 600, .height = 22 }, state.remainders.items[rem_idx].ptr);
-
-            if (button_clicked == 1) {
-                _ = state.remainders.orderedRemove(rem_idx);
+        for (state.remainders.slice(), 0..) |rem, i| {
+            const y_offset = rem_y + 30 + @as(f32, @floatFromInt(i * 35));
+            if (r.GuiButton(.{ .x = 40, .y = y_offset, .width = 22, .height = 22 }, "x") == 1) {
+                rem_to_remove = i;
             }
+            _ = r.GuiLabel(.{ .x = 75, .y = y_offset, .width = 600, .height = 22 }, rem.ptr);
+        }
+
+        if (rem_to_remove) |idx| {
+            state.remainders.orderedRemove(idx);
+            rem_to_remove = null;
         }
 
         r.EndDrawing();
