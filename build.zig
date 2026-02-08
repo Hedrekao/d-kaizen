@@ -11,16 +11,19 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
 
+    const options = b.addOptions();
+    options.addOption([]const u8, "STATE_PATH", (b.option([]const u8, "state_path", "Path to the state file") orelse "state.json"));
+
     root_module.addIncludePath(b.path("thirdparty/raylib-5.5_linux_amd64/include/"));
     root_module.addIncludePath(b.path("thirdparty/"));
     root_module.addLibraryPath(b.path("thirdparty/raylib-5.5_linux_amd64/lib/"));
     root_module.linkSystemLibrary("raylib", .{});
+    root_module.addOptions("config", options);
 
     const exe = b.addExecutable(.{
         .name = "d_kaizen",
         .root_module = root_module,
     });
-
 
     b.installArtifact(exe);
 
