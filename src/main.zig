@@ -5,6 +5,8 @@ const r = @cImport({
     @cInclude("raygui.h");
     @cInclude("style_dark.h");
 });
+
+const STATE_PATH = @import("config").STATE_PATH;
 const BoundedArray = @import("utils.zig").BoundedArray;
 
 const SCREEN_WIDTH = 800;
@@ -33,6 +35,17 @@ const State = struct {
         daily_tasks: []DailyTask,
     };
 
+    fn default() !State {
+        var state = State{ .water = 0.0, .last_save = 0 };
+
+        try state.daily_tasks.append(State.DailyTask{ .name = "take vitamin D", .target = 2, .completed = 0 });
+        try state.daily_tasks.append(State.DailyTask{ .name = "read", .target = 1, .completed = 0 });
+        try state.daily_tasks.append(State.DailyTask{ .name = "exercise", .target = 1, .completed = 0 });
+        try state.daily_tasks.append(State.DailyTask{ .name = "japanese", .target = 1, .completed = 0 });
+
+        return state;
+    }
+
     fn fromParsed(parsed: JsonFormat) !State {
         const new_day = @divFloor(std.time.timestamp(), std.time.s_per_day);
         const last_day = @divFloor(parsed.last_save, std.time.s_per_day);
@@ -57,7 +70,7 @@ const State = struct {
     }
 
     fn save(self: *State) !void {
-        const file = std.fs.cwd().createFile("state.json", .{}) catch return;
+        const file = std.fs.cwd().createFile(STATE_PATH, .{}) catch return;
         defer file.close();
 
         var buffer: [4096]u8 = undefined;
@@ -86,11 +99,22 @@ pub fn main() !void {
     defer state_arena.deinit();
 
     var raw_state: [4096]u8 = undefined;
-    const data = try std.fs.cwd().readFile("state.json", &raw_state);
-    const parsed = try std.json.parseFromSliceLeaky(State.JsonFormat, state_arena.allocator(), data, .{ .ignore_unknown_fields = true });
-    defer state_arena.deinit();
+    const file_data: ?[]u8 = std.fs.cwd().readFile(STATE_PATH, &raw_state) catch |e| blk: {
+        if (e == error.FileNotFound) {
+            break :blk null;
+        }
+        return e;
+    };
 
-    var state = try State.fromParsed(parsed);
+    var state = if (file_data) |data| blk: {
+        const parsed = try std.json.parseFromSliceLeaky(State.JsonFormat, state_arena.allocator(), data, .{ .ignore_unknown_fields = true });
+        defer state_arena.deinit();
+
+        break :blk try State.fromParsed(parsed);
+    } else blk: {
+        break :blk try State.default();
+    };
+
     defer state.save() catch std.debug.print("Failed to save state\n", .{});
 
     const font_size = 30;
